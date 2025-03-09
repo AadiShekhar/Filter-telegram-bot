@@ -35,14 +35,14 @@ def save_file(file_name, file_id):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO files (file_name, file_id) VALUES (%s, %s) ON CONFLICT (file_name) DO NOTHING", 
-                        (file_name, file_id))
+                        (file_name.lower(), file_id))
             conn.commit()
 
 # Fetch file from DB
 def get_file(file_name):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT file_id FROM files WHERE file_name = %s", (file_name,))
+            cur.execute("SELECT file_id FROM files WHERE file_name = %s", (file_name.lower(),))
             result = cur.fetchone()
             return result[0] if result else None
 
@@ -50,7 +50,7 @@ async def handle_audio(update: Update, context: CallbackContext):
     """Save uploaded .mp3 file details"""
     file = update.message.audio or update.message.document
     if file and file.mime_type == "audio/mpeg":
-        file_name = file.file_name
+        file_name = file.file_name.lower()  # Ensure lowercase storage
         file_id = file.file_id
         save_file(file_name, file_id)
         logger.info(f"Saved file: {file_name} (ID: {file_id})")
@@ -61,11 +61,17 @@ async def handle_message(update: Update, context: CallbackContext):
     text = update.message.text.strip()
     logger.info(f"Received message: {text}")
 
+    # If user sends just a number, assume it's an mp3 request
+    if re.fullmatch(r"\d+", text):
+        text += ".mp3"
+
     if re.fullmatch(r"\d+\.mp3", text):
         file_id = get_file(text)
         if file_id:
+            logger.info(f"Sending file: {text}")
             await update.message.reply_audio(file_id)
         else:
+            logger.warning(f"File {text} not found.")
             await update.message.reply_text("File not found.")
 
     elif re.fullmatch(r"\d+\s*-\s*\d+", text):
@@ -77,10 +83,13 @@ async def handle_message(update: Update, context: CallbackContext):
                 file_id = get_file(file_name)
                 if file_id:
                     found = True
+                    logger.info(f"Sending file: {file_name}")
                     await update.message.reply_audio(file_id)
             if not found:
+                logger.warning("No files found in this range.")
                 await update.message.reply_text("No files found in this range.")
         else:
+            logger.warning("Invalid range entered.")
             await update.message.reply_text("Invalid range!")
 
 def main():
