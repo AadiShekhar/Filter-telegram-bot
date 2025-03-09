@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 # Get bot token from environment variable
 TOKEN = os.getenv("TOKEN")
+PORT = int(os.getenv("PORT", 8080))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Set this in Railway as "https://your-railway-app-url.up.railway.app/webhook"
+
 DATA_FILE = "files.json"
 
 # Load stored files
@@ -66,14 +69,27 @@ async def handle_message(update: Update, context: CallbackContext):
             logger.warning("Invalid range entered.")
             await update.message.reply_text("Invalid range!")
 
+async def set_webhook(app):
+    """Set webhook for Telegram bot"""
+    await app.bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
+
 def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(MessageHandler(filters.AUDIO | filters.Document.MimeType("audio/mpeg"), handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot is running...")
-    app.run_polling()
+    # Run webhook instead of polling
+    logger.info("Setting webhook...")
+    app.bot.loop.run_until_complete(set_webhook(app))
+
+    logger.info("Bot is running with webhook...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="webhook"
+    )
 
 if __name__ == "__main__":
     main()
