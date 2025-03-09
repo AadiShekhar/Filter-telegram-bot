@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import asyncpg
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CallbackContext
 
@@ -9,33 +10,56 @@ from telegram.ext import Application, MessageHandler, filters, CallbackContext
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Get bot token from environment variable
+# Get environment variables
 TOKEN = os.getenv("TOKEN")
-PORT = int(os.getenv("PORT", 8080))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Set this in Railway as "https://your-railway-app-url.up.railway.app/webhook"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-DATA_FILE = "files.json"
+# Initialize database connection (global variable)
+db_pool = None
 
-# Load stored files
-if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r") as f:
-        file_data = json.load(f)
-else:
-    file_data = {}
+async def init_db():
+    """Initialize database connection pool."""
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
 
-def save_data():
-    """Save file data to JSON"""
-    with open(DATA_FILE, "w") as f:
-        json.dump(file_data, f)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS files (
+                id SERIAL PRIMARY KEY,
+                file_name TEXT UNIQUE NOT NULL,
+                file_id TEXT NOT NULL
+            );
+        """)
+        logger.info("Database initialized.")
+
+async def save_file(file_name, file_id):
+    """Save file details in PostgreSQL."""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO files (file_name, file_id) VALUES ($1, $2) ON CONFLICT (file_name) DO NOTHING",
+            file_name, file_id
+        )
+
+async def get_file(file_name):
+    """Retrieve file_id from database."""
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchval("SELECT file_id FROM files WHERE file_name = $1", file_name)
+        return result
+
+async def get_files_in_range(start, end):
+    """Retrieve all file_ids in a given range."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT file_name, file_id FROM files WHERE file_name BETWEEN $1 AND $2", f"{start}.mp3", f"{end}.mp3")
+        return {row["file_name"]: row["file_id"] for row in rows}
 
 async def handle_audio(update: Update, context: CallbackContext):
-    """Save uploaded .mp3 file details"""
+    """Save uploaded .mp3 file details to database."""
     file = update.message.audio or update.message.document
     if file and file.mime_type == "audio/mpeg":
         file_name = file.file_name
         file_id = file.file_id
-        file_data[file_name] = file_id
-        save_data()
+
+        await save_file(file_name, file_id)
         logger.info(f"Saved file: {file_name} (ID: {file_id})")
         await update.message.reply_text(f"Saved {file_name}!")
 
@@ -46,9 +70,10 @@ async def handle_message(update: Update, context: CallbackContext):
 
     # Single file request
     if re.fullmatch(r"\d+\.mp3", text):
-        if text in file_data:
+        file_id = await get_file(text)
+        if file_id:
             logger.info(f"Found file: {text}, sending...")
-            await update.message.reply_audio(file_data[text])
+            await update.message.reply_audio(file_id)
         else:
             logger.warning(f"File {text} not found.")
             await update.message.reply_text("File not found.")
@@ -57,11 +82,11 @@ async def handle_message(update: Update, context: CallbackContext):
     elif re.fullmatch(r"\d+\s*-\s*\d+", text):
         start, end = map(int, text.split('-'))
         if start <= end:
-            found_files = [f"{i}.mp3" for i in range(start, end + 1) if f"{i}.mp3" in file_data]
-            if found_files:
-                for file in found_files:
-                    logger.info(f"Sending file: {file}")
-                    await update.message.reply_audio(file_data[file])
+            files = await get_files_in_range(start, end)
+            if files:
+                for file_name, file_id in files.items():
+                    logger.info(f"Sending file: {file_name}")
+                    await update.message.reply_audio(file_id)
             else:
                 logger.warning("No files found in this range.")
                 await update.message.reply_text("No files found in this range.")
@@ -69,27 +94,18 @@ async def handle_message(update: Update, context: CallbackContext):
             logger.warning("Invalid range entered.")
             await update.message.reply_text("Invalid range!")
 
-async def set_webhook(app):
-    """Set webhook for Telegram bot"""
-    await app.bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"Webhook set to {WEBHOOK_URL}")
+async def main():
+    """Start the bot with polling"""
+    global db_pool
+    await init_db()
 
-def main():
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(MessageHandler(filters.AUDIO | filters.Document.MimeType("audio/mpeg"), handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Run webhook instead of polling
-    logger.info("Setting webhook...")
-    app.bot.loop.run_until_complete(set_webhook(app))
-
-    logger.info("Bot is running with webhook...")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="webhook"
-    )
+    logger.info("Bot is running with polling...")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
